@@ -10,21 +10,33 @@ from app.utils.file_utils import collect_source_files, safe_extract_zip, safe_jo
 from app.utils.validators import validate_github_url
 
 
-def prepare_upload_workspace(files: list[tuple[str, bytes]]) -> Path:
-    """Persist uploaded files or ZIP archives safely into an isolated workspace without executing anything."""
+def _workspace_bytes(workspace: Path) -> int:
+    return sum(p.stat().st_size for p in workspace.rglob("*") if p.is_file())
+
+
+def create_empty_upload_workspace() -> Path:
+    """Create an isolated empty workspace directory for uploaded code scans."""
     settings = get_settings()
-    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     workspace = Path(settings.UPLOAD_DIR).resolve() / f"scan_{uuid.uuid4().hex}"
     workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
 
-    total_written = 0
+
+def append_files_to_workspace(workspace: Path, files: list[tuple[str, bytes]], cleanup_on_error: bool = False) -> None:
+    """Write uploaded files or ZIP archives safely into an existing isolated workspace."""
+    settings = get_settings()
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    total_written = _workspace_bytes(workspace)
+
     for filename, content in files:
         total_written += len(content)
         if total_written > max_bytes:
-            shutil.rmtree(workspace, ignore_errors=True)
+            if cleanup_on_error:
+                shutil.rmtree(workspace, ignore_errors=True)
             raise ValueError(f"Upload exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB.")
 
-        safe_target = safe_join(workspace, Path(filename).name if "/" not in filename and "\\" not in filename else filename)
+        rel_name = Path(filename).name if "/" not in filename and "\\" not in filename else filename
+        safe_target = safe_join(workspace, rel_name)
         safe_target.parent.mkdir(parents=True, exist_ok=True)
         safe_target.write_bytes(content)
 
@@ -33,6 +45,11 @@ def prepare_upload_workspace(files: list[tuple[str, bytes]]) -> Path:
             safe_extract_zip(safe_target, extract_dir)
             safe_target.unlink(missing_ok=True)
 
+
+def prepare_upload_workspace(files: list[tuple[str, bytes]]) -> Path:
+    """Persist uploaded files or ZIP archives safely into an isolated workspace without executing anything."""
+    workspace = create_empty_upload_workspace()
+    append_files_to_workspace(workspace, files, cleanup_on_error=True)
     return workspace
 
 

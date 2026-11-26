@@ -151,3 +151,38 @@ def test_intelligence_sync_endpoint_with_mocked_feeds(client):
     cve_list = client.get("/api/v1/cve?kev_only=true", headers=headers)
     assert cve_list.status_code == 200
     assert cve_list.json()["items"][0]["cve_id"] == "CVE-2025-7777"
+
+
+def test_chunked_folder_code_upload_workflow(client):
+    headers = _register_and_login(client)
+
+    init_resp = client.post(
+        "/api/v1/code-scans/upload/init",
+        headers=headers,
+        json={"target_label": "large_project (2 files)", "total_files": 2},
+    )
+    assert init_resp.status_code == 201
+    scan_id = init_resp.json()["id"]
+
+    c1 = client.post(
+        f"/api/v1/code-scans/upload/{scan_id}/chunk",
+        headers=headers,
+        files=[("files", ("large_project/sub/safe.py", io.BytesIO(b"def ok():\n    return 1\n"), "text/x-python"))],
+    )
+    assert c1.status_code == 200
+    assert c1.json()["uploaded_files"] == 1
+
+    c2 = client.post(
+        f"/api/v1/code-scans/upload/{scan_id}/chunk",
+        headers=headers,
+        files=[("files", ("large_project/app.py", io.BytesIO(b"import os\ndef run(x):\n    os.system(x)\n"), "text/x-python"))],
+    )
+    assert c2.status_code == 200
+    assert c2.json()["uploaded_files"] == 2
+
+    exec_resp = client.post(f"/api/v1/code-scans/upload/{scan_id}/execute", headers=headers)
+    assert exec_resp.status_code == 200
+    data = exec_resp.json()
+    assert data["status"] == "completed"
+    assert data["summary"]["files_scanned"] == 2
+    assert data["summary"]["confirmed_findings"] >= 1

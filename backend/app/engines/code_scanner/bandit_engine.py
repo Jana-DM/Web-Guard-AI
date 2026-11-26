@@ -24,7 +24,7 @@ def run_bandit_scan(workspace: Path) -> dict[str, Any]:
 
     cmd = [bandit_exe, "-r", str(workspace), "-f", "json", "-q"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         raw = proc.stdout.strip()
         if not raw:
             return {"available": True, "findings": []}

@@ -22,12 +22,59 @@ export const scannerApi = {
     apiRequest<ScanJob[]>(scanType ? `/domain-scans?scan_type=${encodeURIComponent(scanType)}` : '/domain-scans'),
   getScanDetail: (scanId: string) =>
     apiRequest<{ job: ScanJob; results: Array<{ module: string; status: string; data: Record<string, unknown> }>; fingerprints: Array<Record<string, unknown>>; vulnerabilities_count: number }>(`/domain-scans/${scanId}`),
-  uploadCodeScan: (files: FileList | File[]) => {
-    const formData = new FormData()
-    Array.from(files).forEach((file) => formData.append('files', file))
-    return apiRequest<ScanJob>('/code-scans/upload', {
+  uploadCodeScan: async (
+    files: FileList | File[],
+    onProgress?: (info: { uploaded: number; total: number; stage: 'uploading' | 'analyzing' }) => void
+  ) => {
+    const fileArray = Array.from(files)
+    const getRelPath = (file: File) =>
+      (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+
+    if (fileArray.length <= 300) {
+      onProgress?.({ uploaded: fileArray.length, total: fileArray.length, stage: 'analyzing' })
+      const formData = new FormData()
+      fileArray.forEach((file) => formData.append('files', file, getRelPath(file)))
+      return apiRequest<ScanJob>('/code-scans/upload', {
+        method: 'POST',
+        body: formData,
+      })
+    }
+
+    const roots = new Set(
+      fileArray
+        .map((f) => getRelPath(f).replace(/\\/g, '/'))
+        .filter((p) => p.includes('/'))
+        .map((p) => p.split('/')[0])
+    )
+    const targetLabel =
+      roots.size === 1
+        ? `${Array.from(roots)[0]} (${fileArray.length} files)`
+        : `${fileArray.length} uploaded items`
+
+    const job = await apiRequest<ScanJob>('/code-scans/upload/init', {
       method: 'POST',
-      body: formData,
+      body: JSON.stringify({ target_label: targetLabel, total_files: fileArray.length }),
+    })
+
+    const chunkSize = 250
+    for (let i = 0; i < fileArray.length; i += chunkSize) {
+      const batch = fileArray.slice(i, i + chunkSize)
+      const formData = new FormData()
+      batch.forEach((file) => formData.append('files', file, getRelPath(file)))
+      await apiRequest<{ uploaded_files: number }>(`/code-scans/upload/${job.id}/chunk`, {
+        method: 'POST',
+        body: formData,
+      })
+      onProgress?.({
+        uploaded: Math.min(i + batch.length, fileArray.length),
+        total: fileArray.length,
+        stage: 'uploading',
+      })
+    }
+
+    onProgress?.({ uploaded: fileArray.length, total: fileArray.length, stage: 'analyzing' })
+    return apiRequest<ScanJob>(`/code-scans/upload/${job.id}/execute`, {
+      method: 'POST',
     })
   },
   scanGitHubRepo: (repository_url: string, branch?: string) =>

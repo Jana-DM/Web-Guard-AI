@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
 export function getStoredToken(): string | null {
   return localStorage.getItem('wg_access_token')
@@ -49,5 +49,4 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
   return (await response.text()) as unknown as T
 }
-
 export { API_BASE }

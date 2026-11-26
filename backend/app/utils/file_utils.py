@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Iterable
 
 
-MAX_ARCHIVE_FILES = 1500
-MAX_ARCHIVE_UNCOMPRESSED_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_ARCHIVE_FILES = 25000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 250 * 1024 * 1024  # 250 MB
 
 
 def safe_join(base_dir: Path, untrusted_path: str) -> Path:
@@ -58,7 +58,22 @@ def sha256_text(content: str) -> str:
 
 def collect_source_files(root: Path, extensions: Iterable[str] = (".py", ".js", ".jsx", ".ts", ".tsx")) -> list[Path]:
     ext_set = {e.lower() for e in extensions}
-    ignored_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+    ignored_dirs = {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "env",
+        "__pycache__",
+        "dist",
+        "build",
+        ".next",
+        "site-packages",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".tox",
+        "coverage",
+    }
     results: list[Path] = []
     for current_root, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in ignored_dirs]
