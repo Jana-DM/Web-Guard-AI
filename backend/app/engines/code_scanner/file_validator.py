@@ -4,15 +4,8 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any
 
 from app.config import get_settings
-from app.engines.code_scanner.content_validator import (
-    classify_non_sensitive_filename,
-    is_sensitive_path,
-    sanitize_workspace_sensitive_items,
-    validate_workspace_content,
-)
 from app.utils.file_utils import collect_source_files, safe_extract_zip, safe_join
 from app.utils.validators import validate_github_url
 
@@ -33,28 +26,17 @@ def append_files_to_workspace(
     workspace: Path,
     files: list[tuple[str, bytes]],
     cleanup_on_error: bool = False,
-) -> dict[str, Any]:
+) -> None:
     """
-    Write uploaded non-sensitive source files or ZIP archives safely into workspace.
-    Sensitive paths and media binaries are skipped before writing/reading disk.
+    Write uploaded source files, configs, and ZIP archives safely into the isolated workspace.
+    Preserves all original files (including .env and hidden configs) without modification.
     """
     settings = get_settings()
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     total_written = _workspace_bytes(workspace)
-    skipped_sensitive: list[str] = []
-    skipped_non_web: dict[str, int] = {}
 
     for filename, content in files:
         rel_name = Path(filename).name if "/" not in filename and "\\" not in filename else filename
-
-        # Never inspect, write, or store sensitive files/folders
-        is_sens, sens_label = is_sensitive_path(rel_name)
-        if is_sens:
-            if sens_label and sens_label not in skipped_sensitive:
-                skipped_sensitive.append(sens_label)
-            continue
-
-        # Ensure safe path inside workspace
         safe_target = safe_join(workspace, rel_name)
 
         if safe_target.suffix.lower() == ".zip":
@@ -66,19 +48,8 @@ def append_files_to_workspace(
             safe_target.parent.mkdir(parents=True, exist_ok=True)
             safe_target.write_bytes(content)
             extract_dir = workspace / f"extracted_{safe_target.stem}"
-            safe_extract_zip(
-                safe_target,
-                extract_dir,
-                skipped_sensitive=skipped_sensitive,
-                skipped_non_web=skipped_non_web,
-            )
+            safe_extract_zip(safe_target, extract_dir)
             safe_target.unlink(missing_ok=True)
-            continue
-
-        # Skip pure media binaries immediately without saving to disk
-        kind = classify_non_sensitive_filename(rel_name)
-        if kind in {"images", "videos", "audio", "documents"}:
-            skipped_non_web[kind] = skipped_non_web.get(kind, 0) + 1
             continue
 
         total_written += len(content)
@@ -90,38 +61,17 @@ def append_files_to_workspace(
         safe_target.parent.mkdir(parents=True, exist_ok=True)
         safe_target.write_bytes(content)
 
-    return {"skipped_sensitive": skipped_sensitive, "skipped_non_web": skipped_non_web}
 
-
-def prepare_upload_workspace(
-    files: list[tuple[str, bytes]],
-    pre_sensitive: list[str] | None = None,
-    pre_non_web: dict[str, int] | None = None,
-) -> tuple[Path, dict[str, Any]]:
-    """Persist uploaded files safely and verify the workspace contains valid web/code content."""
+def prepare_upload_workspace(files: list[tuple[str, bytes]]) -> Path:
+    """Persist uploaded project folder or files safely into an isolated workspace without executing anything."""
     workspace = create_empty_upload_workspace()
-    ingest_meta = append_files_to_workspace(workspace, files, cleanup_on_error=True)
-    merged_sensitive = list(dict.fromkeys([*(pre_sensitive or []), *ingest_meta["skipped_sensitive"]]))
-    merged_non_web = dict(pre_non_web or {})
-    for k, v in ingest_meta["skipped_non_web"].items():
-        merged_non_web[k] = merged_non_web.get(k, 0) + v
-
-    inspection = validate_workspace_content(
-        workspace,
-        pre_sensitive=merged_sensitive,
-        pre_non_web=merged_non_web,
-    )
-    return workspace, {
-        "sensitive_detected": inspection.sensitive_detected,
-        "skipped_non_web": inspection.skipped_non_web,
-        "scannable_count": len(inspection.web_files),
-    }
+    append_files_to_workspace(workspace, files, cleanup_on_error=True)
+    return workspace
 
 
-def clone_github_repository(repository_url: str, branch: str | None = None) -> tuple[Path, dict[str, Any]]:
+def clone_github_repository(repository_url: str, branch: str | None = None) -> Path:
     """
-    Shallow-clone a public GitHub repo with hooks disabled, strip any sensitive
-    files/folders immediately without inspecting them, and verify valid web content exists.
+    Shallow-clone a public GitHub repository with git hooks disabled for static-only inspection.
     """
     clean_url = validate_github_url(repository_url)
     settings = get_settings()
@@ -148,13 +98,7 @@ def clone_github_repository(repository_url: str, branch: str | None = None) -> t
         shutil.rmtree(workspace, ignore_errors=True)
         raise ValueError(f"GitHub repository clone failed: {proc.stderr.strip()[:300]}")
 
-    sensitive_removed = sanitize_workspace_sensitive_items(workspace)
-    inspection = validate_workspace_content(workspace, pre_sensitive=sensitive_removed)
-    return workspace, {
-        "sensitive_detected": inspection.sensitive_detected,
-        "skipped_non_web": inspection.skipped_non_web,
-        "scannable_count": len(inspection.web_files),
-    }
+    return workspace
 
 
 def list_scannable_files(workspace: Path) -> list[Path]:

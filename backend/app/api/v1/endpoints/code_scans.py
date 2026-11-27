@@ -1,16 +1,12 @@
-import json
-import shutil
 from pathlib import Path
-from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ResourceNotFoundError
 from app.database.session import get_db
 from app.dependencies import get_current_user, require_analyst
-from app.engines.code_scanner.content_validator import validate_workspace_content
 from app.engines.code_scanner.file_validator import (
     append_files_to_workspace,
     clone_github_repository,
@@ -29,18 +25,6 @@ router = APIRouter(prefix="/code-scans", tags=["Code Scanner"])
 class ChunkedUploadInitRequest(BaseModel):
     target_label: str = Field(default="uploaded_folder", max_length=255)
     total_files: int = Field(ge=1, le=50000)
-    skipped_sensitive: list[str] = Field(default_factory=list)
-    skipped_non_web: dict[str, int] = Field(default_factory=dict)
-
-
-def _parse_json_meta(raw: str | None, fallback: Any) -> Any:
-    if not raw:
-        return fallback
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, type(fallback)) else fallback
-    except ValueError:
-        return fallback
 
 
 def _format_upload_label(files: list[UploadFile]) -> str:
@@ -71,16 +55,11 @@ def _get_owned_upload_job(db: Session, scan_id: str, current_user: User) -> Scan
 async def upload_and_scan_code(
     request: Request,
     files: list[UploadFile] = File(...),
-    skipped_sensitive_json: str | None = Form(default=None),
-    skipped_non_web_json: str | None = Form(default=None),
     current_user: User = Depends(require_analyst),
     db: Session = Depends(get_db),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="At least one source file or ZIP archive is required.")
-
-    pre_sensitive = _parse_json_meta(skipped_sensitive_json, [])
-    pre_non_web = _parse_json_meta(skipped_non_web_json, {})
 
     file_tuples: list[tuple[str, bytes]] = []
     for f in files:
@@ -88,11 +67,7 @@ async def upload_and_scan_code(
         file_tuples.append((f.filename or "uploaded_file.py", content))
 
     try:
-        workspace, content_meta = prepare_upload_workspace(
-            file_tuples,
-            pre_sensitive=pre_sensitive,
-            pre_non_web=pre_non_web,
-        )
+        workspace = prepare_upload_workspace(file_tuples)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -113,13 +88,16 @@ async def upload_and_scan_code(
             resource_type="scan_job",
             resource_id=scan_job.id,
             ip_address=request.client.host if request.client else None,
-            details={"files_count": content_meta.get("scannable_count", len(files)), "label": label},
+            details={"files_count": len(files), "label": label},
         )
     )
     db.commit()
     db.refresh(scan_job)
 
-    return execute_code_scan_job(db=db, scan_job=scan_job, workspace=workspace, extra_summary=content_meta)
+    try:
+        return execute_code_scan_job(db=db, scan_job=scan_job, workspace=workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/upload/init", response_model=ScanJobResponse, status_code=status.HTTP_201_CREATED)
@@ -137,12 +115,7 @@ def init_chunked_code_upload(
         source_path=str(workspace),
         status="queued",
         progress=0,
-        summary={
-            "expected_files": payload.total_files,
-            "uploaded_files": 0,
-            "sensitive_detected": list(dict.fromkeys(payload.skipped_sensitive)),
-            "skipped_non_web": dict(payload.skipped_non_web),
-        },
+        summary={"expected_files": payload.total_files, "uploaded_files": 0},
     )
     db.add(scan_job)
     db.commit()
@@ -157,7 +130,7 @@ async def upload_code_chunk(
     current_user: User = Depends(require_analyst),
     db: Session = Depends(get_db),
 ):
-    """Append a batch of non-sensitive files from a folder to an initialized upload workspace."""
+    """Append a batch of files from a folder to an initialized upload workspace."""
     job = _get_owned_upload_job(db, scan_id, current_user)
     if not files:
         raise HTTPException(status_code=400, detail="Chunk contains no files.")
@@ -168,7 +141,7 @@ async def upload_code_chunk(
         file_tuples.append((f.filename or "uploaded_file.py", content))
 
     try:
-        ingest_meta = append_files_to_workspace(Path(job.source_path), file_tuples, cleanup_on_error=False)
+        append_files_to_workspace(Path(job.source_path), file_tuples, cleanup_on_error=False)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -176,13 +149,6 @@ async def upload_code_chunk(
     uploaded = int(summary.get("uploaded_files", 0)) + len(file_tuples)
     expected = max(int(summary.get("expected_files", uploaded)), 1)
     summary["uploaded_files"] = uploaded
-    summary["sensitive_detected"] = list(
-        dict.fromkeys([*(summary.get("sensitive_detected") or []), *ingest_meta["skipped_sensitive"]])
-    )
-    non_web = dict(summary.get("skipped_non_web") or {})
-    for k, v in ingest_meta["skipped_non_web"].items():
-        non_web[k] = non_web.get(k, 0) + v
-    summary["skipped_non_web"] = non_web
     job.summary = summary
     job.progress = min(14, int((uploaded / expected) * 14))
     db.commit()
@@ -196,22 +162,10 @@ def execute_chunked_code_upload(
     current_user: User = Depends(require_analyst),
     db: Session = Depends(get_db),
 ):
-    """Validate web content and run static code analysis once all folder chunks have been uploaded."""
+    """Validate web technologies and run security analysis once all folder chunks are uploaded."""
     job = _get_owned_upload_job(db, scan_id, current_user)
     summary = dict(job.summary or {})
     workspace = Path(job.source_path)
-
-    try:
-        inspection = validate_workspace_content(
-            workspace,
-            pre_sensitive=summary.get("sensitive_detected") or [],
-            pre_non_web=summary.get("skipped_non_web") or {},
-        )
-    except ValueError as exc:
-        shutil.rmtree(workspace, ignore_errors=True)
-        db.delete(job)
-        db.commit()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     db.add(
         AuditLog(
@@ -220,19 +174,15 @@ def execute_chunked_code_upload(
             resource_type="scan_job",
             resource_id=job.id,
             ip_address=request.client.host if request.client else None,
-            details={"files_count": len(inspection.web_files), "label": job.target_label, "chunked": True},
+            details={"files_count": summary.get("uploaded_files", 0), "label": job.target_label, "chunked": True},
         )
     )
     db.commit()
-    return execute_code_scan_job(
-        db=db,
-        scan_job=job,
-        workspace=workspace,
-        extra_summary={
-            "sensitive_detected": inspection.sensitive_detected,
-            "skipped_non_web": inspection.skipped_non_web,
-        },
-    )
+
+    try:
+        return execute_code_scan_job(db=db, scan_job=job, workspace=workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/github", response_model=ScanJobResponse, status_code=status.HTTP_201_CREATED)
@@ -243,7 +193,7 @@ def scan_github_repo(
     db: Session = Depends(get_db),
 ):
     try:
-        workspace, content_meta = clone_github_repository(payload.repository_url, branch=payload.branch)
+        workspace = clone_github_repository(payload.repository_url, branch=payload.branch)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -270,7 +220,10 @@ def scan_github_repo(
     db.commit()
     db.refresh(scan_job)
 
-    return execute_code_scan_job(db=db, scan_job=scan_job, workspace=workspace, extra_summary=content_meta)
+    try:
+        return execute_code_scan_job(db=db, scan_job=scan_job, workspace=workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{scan_id}", response_model=ScanJobResponse)

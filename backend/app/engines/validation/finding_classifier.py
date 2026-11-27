@@ -9,17 +9,18 @@ from app.engines.validation.false_positive_filter import evaluate_false_positive
 
 
 def validate_and_classify_findings(raw_findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Run the 6-stage AI & evidence validation pipeline on candidate findings.
-
-    Stages:
-    1. Detection
-    2. Context Analysis
-    3. Cross Validation
-    4. Evidence Collection
-    5. Confidence Assessment
-    6. Final Classification (CONFIRMED | POTENTIAL | NEEDS REVIEW | NOT REPRODUCED)
     """
-    # Group by (location, cwe_id) to detect multi-engine corroboration (e.g., AST + Bandit)
+    Run evidence-based validation pipeline on detected issues:
+    1. Identify suspicious code & extract surrounding context
+    2. Check reachability, taint, and sanitization
+    3. Multi-engine cross-validation & corroboration
+    4. Calculate confidence score
+    5. Classify into:
+       - CONFIRMED: Strong verifiable evidence supports the vulnerability.
+       - POTENTIAL: Suspicious behavior requiring manual verification.
+       - INFORMATIONAL: Security improvement or best-practice recommendation.
+       - NOT REPRODUCED: Filtered false positive (test context, comment, inactive).
+    """
     engine_groups: dict[tuple[str, str], set[str]] = {}
     for f in raw_findings:
         key = (str(f.get("location", "")), str(f.get("cwe_id") or f.get("category") or ""))
@@ -43,19 +44,26 @@ def validate_and_classify_findings(raw_findings: list[dict[str, Any]]) -> list[d
         confidence = calculate_confidence(evidence_items, context, corroborated_by_multiple_engines=corroborated)
 
         has_verifiable = any(e.get("is_verifiable") for e in evidence_items)
+        hint = str(f.get("classification_hint", "")).upper()
+        engine = str(f.get("source_engine", ""))
 
-        # Strict accuracy rule: CONFIRMED requires concrete verifiable evidence AND confidence >= 0.75
-        if is_fp or confidence < 0.30:
+        if is_fp or (confidence < 0.25 and engine != "secret_detector") or not has_verifiable:
             classification = "NOT REPRODUCED"
-        elif has_verifiable and confidence >= 0.75:
+        elif hint == "INFORMATIONAL" or (f.get("severity") in {"low", "info"} and confidence < 0.70):
+            classification = "INFORMATIONAL"
+        elif engine == "secret_detector":
+            # Direct verifiable token pattern match
             classification = "CONFIRMED"
-        elif has_verifiable and confidence >= 0.50:
+            confidence = max(confidence, 0.95)
+        elif has_verifiable and confidence >= 0.70:
+            classification = "CONFIRMED"
+        elif has_verifiable or confidence >= 0.40:
             classification = "POTENTIAL"
         else:
-            classification = "NEEDS REVIEW"
+            classification = "INFORMATIONAL"
 
         stages = {
-            "1_detection": {"engine": f.get("source_engine"), "title": f.get("title")},
+            "1_detection": {"engine": engine, "title": f.get("title")},
             "2_context_analysis": context,
             "3_cross_validation": {
                 "corroborated": corroborated,

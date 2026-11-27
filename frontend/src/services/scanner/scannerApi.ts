@@ -24,26 +24,16 @@ export const scannerApi = {
     apiRequest<{ job: ScanJob; results: Array<{ module: string; status: string; data: Record<string, unknown> }>; fingerprints: Array<Record<string, unknown>>; vulnerabilities_count: number }>(`/domain-scans/${scanId}`),
   uploadCodeScan: async (
     files: FileList | File[],
-    onProgress?: (info: { uploaded: number; total: number; stage: 'uploading' | 'analyzing' }) => void,
-    metadata?: { skippedSensitive?: string[]; skippedNonWeb?: Record<string, number> }
+    onProgress?: (info: { uploaded: number; total: number; stage: 'uploading' | 'analyzing' }) => void
   ) => {
     const fileArray = Array.from(files)
     const getRelPath = (file: File) =>
       (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
 
-    const skippedSensitive = metadata?.skippedSensitive || []
-    const skippedNonWeb = metadata?.skippedNonWeb || {}
-
     if (fileArray.length <= 300) {
       onProgress?.({ uploaded: fileArray.length, total: fileArray.length, stage: 'analyzing' })
       const formData = new FormData()
       fileArray.forEach((file) => formData.append('files', file, getRelPath(file)))
-      if (skippedSensitive.length > 0) {
-        formData.append('skipped_sensitive_json', JSON.stringify(skippedSensitive))
-      }
-      if (Object.keys(skippedNonWeb).length > 0) {
-        formData.append('skipped_non_web_json', JSON.stringify(skippedNonWeb))
-      }
       return apiRequest<ScanJob>('/code-scans/upload', {
         method: 'POST',
         body: formData,
@@ -66,8 +56,6 @@ export const scannerApi = {
       body: JSON.stringify({
         target_label: targetLabel,
         total_files: fileArray.length,
-        skipped_sensitive: skippedSensitive,
-        skipped_non_web: skippedNonWeb,
       }),
     })
 

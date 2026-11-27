@@ -3,7 +3,8 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from app.engines.code_scanner.content_validator import sanitize_workspace_sensitive_items, validate_workspace_content
+from app.engines.code_scanner.project_validator import build_project_inventory, validate_web_project
+from app.engines.code_scanner.secret_detector import mask_secret, scan_file_for_sensitive_info
 from app.models.scan_job import ScanJob
 
 
@@ -11,20 +12,20 @@ def _auth_headers(client):
     client.post(
         "/api/v1/auth/register",
         json={
-            "email": "guard@webguard.io",
-            "username": "guard_lead",
+            "email": "scanner_lead@webguard.io",
+            "username": "scanner_lead",
             "password": "StrongPassword123!",
-            "full_name": "Guard Lead",
+            "full_name": "Scanner Lead",
         },
     )
     login = client.post(
         "/api/v1/auth/login",
-        json={"email_or_username": "guard_lead", "password": "StrongPassword123!"},
+        json={"email_or_username": "scanner_lead", "password": "StrongPassword123!"},
     )
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 
-def test_rejects_images_videos_only_folder(client):
+def test_validation_fails_for_non_web_media_only_project(client):
     headers = _auth_headers(client)
     resp = client.post(
         "/api/v1/code-scans/upload",
@@ -35,105 +36,67 @@ def test_rejects_images_videos_only_folder(client):
         ],
     )
     assert resp.status_code == 400
-    detail = resp.json()["detail"].lower()
-    assert "no valid web or source code files" in detail
-    assert "image" in detail
-    assert "video" in detail
+    detail = resp.json()["detail"]
+    assert "Web Project Validation Failed" in detail
 
 
-def test_rejects_plain_text_only_upload(client):
+def test_validation_succeeds_and_scans_react_vite_project_with_masked_secrets(client, db_session):
     headers = _auth_headers(client)
-    resp = client.post(
-        "/api/v1/code-scans/upload",
-        headers=headers,
-        files=[
-            ("files", ("notes.txt", io.BytesIO(b"Meeting notes: buy coffee and check schedule."), "text/plain")),
-        ],
-    )
-    assert resp.status_code == 400
-    assert "plain text" in resp.json()["detail"].lower()
+    secret_key = "sk_live_51M0123456789ABCDEF012345"
+    jwt_secret = "my_super_secret_jwt_signing_key_999"
 
-
-def test_scans_html_css_mixed_with_images_and_excludes_sensitive_without_saving(client, db_session):
-    headers = _auth_headers(client)
-    secret_marker = "SUPER_SECRET_NEVER_INSPECT_OR_SAVE_TOKEN_999"
-    html_bytes = b"<html><body><button onclick='alert(1)'>Go</button></body></html>"
-    css_bytes = b"@import 'http://cdn.insecure.example/style.css'; body { color: #fff; }"
+    package_json = b'{"name": "my-vite-app", "dependencies": {"react": "^18.2.0", "vite": "^5.0.0"}}'
+    vite_config = b"import { defineConfig } from 'vite'; export default defineConfig({});"
+    app_jsx = b"""
+    import React from 'react';
+    export function App() {
+        const rawHtml = '<img src=x onerror=alert(1)>';
+        return <div dangerouslySetInnerHTML={{ __html: rawHtml }} />;
+    }
+    """
+    env_content = f"VITE_STRIPE_KEY={secret_key}\nJWT_SECRET={jwt_secret}\n".encode()
 
     resp = client.post(
         "/api/v1/code-scans/upload",
         headers=headers,
         files=[
-            ("files", ("webapp/index.html", io.BytesIO(html_bytes), "text/html")),
-            ("files", ("webapp/styles.css", io.BytesIO(css_bytes), "text/css")),
-            ("files", ("webapp/banner.jpg", io.BytesIO(b"\xff\xd8\xff\xe0"), "image/jpeg")),
-            ("files", ("webapp/.env", io.BytesIO(f"API_SECRET={secret_marker}\n".encode()), "text/plain")),
-            ("files", ("webapp/secrets/private.key", io.BytesIO(secret_marker.encode()), "application/octet-stream")),
+            ("files", ("my-website/package.json", io.BytesIO(package_json), "application/json")),
+            ("files", ("my-website/vite.config.js", io.BytesIO(vite_config), "application/javascript")),
+            ("files", ("my-website/src/App.jsx", io.BytesIO(app_jsx), "text/javascript")),
+            ("files", ("my-website/.env", io.BytesIO(env_content), "text/plain")),
+            ("files", ("my-website/public/logo.png", io.BytesIO(b"\x89PNG"), "image/png")),
         ],
     )
     assert resp.status_code == 201
     data = resp.json()
     summary = data["summary"]
-    assert summary["files_scanned"] == 2
-    assert summary["languages"]["html"] == 1
-    assert summary["languages"]["css"] == 1
-    assert summary["skipped_non_web"]["images"] == 1
-    assert "webapp/.env" in summary["sensitive_detected"]
-    assert any(s.startswith("webapp/secrets") for s in summary["sensitive_detected"])
 
-    # Verify sensitive contents were NEVER saved to workspace on disk or into DB findings
-    job = db_session.query(ScanJob).filter(ScanJob.id == data["id"]).first()
-    workspace = Path(job.source_path)
-    assert not (workspace / "webapp" / ".env").exists()
-    assert not (workspace / "webapp" / "secrets").exists()
-    assert not (workspace / "webapp" / "banner.jpg").exists()
+    # 1. Project Technology Validation
+    assert summary["validation_status"] == "VALIDATED"
+    assert "React" in summary["detected_technologies"]
+    assert "Vite" in summary["detected_technologies"]
 
-    vulns_resp = client.get(f"/api/v1/vulnerabilities?scan_job_id={data['id']}", headers=headers)
-    assert secret_marker not in vulns_resp.text
+    # 2. File Inventory
+    assert summary["total_files_discovered"] >= 5
+    assert summary["total_files_scanned"] >= 4  # package.json, vite.config.js, App.jsx, .env
+    assert summary["total_files_excluded"] >= 1  # logo.png binary
 
+    # 3. Sensitive Information Detection with strict masking
+    assert summary["sensitive_findings_count"] >= 2
+    sensitive_items = summary["sensitive_information_findings"]
+    assert any(s["type"] == "Stripe Secret Key" or "Secret" in s["type"] for s in sensitive_items)
 
-def test_zip_archive_skips_sensitive_entries_without_extracting(client, db_session):
-    headers = _auth_headers(client)
-    secret_marker = "ZIP_SECRET_SHOULD_NEVER_HIT_DISK_12345"
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("site/.env", f"DB_PASS={secret_marker}\n")
-        zf.writestr("site/secrets/key.pem", secret_marker)
-        zf.writestr("site/app.html", "<a href='javascript:alert(1)'>click</a>")
+    # Verify secret value is masked and never exposed in full plaintext
+    for s in sensitive_items:
+        assert secret_key not in s["masked_value"]
+        assert jwt_secret not in s["masked_value"]
+        assert "*" in s["masked_value"]
 
-    resp = client.post(
-        "/api/v1/code-scans/upload",
-        headers=headers,
-        files=[("files", ("bundle.zip", io.BytesIO(buf.getvalue()), "application/zip"))],
-    )
-    assert resp.status_code == 201
-    data = resp.json()
-    assert "site/.env" in data["summary"]["sensitive_detected"]
-    assert any("secrets" in s for s in data["summary"]["sensitive_detected"])
-
-    job = db_session.query(ScanJob).filter(ScanJob.id == data["id"]).first()
-    workspace = Path(job.source_path)
-    for p in workspace.rglob("*"):
-        if p.is_file():
-            assert secret_marker not in p.read_text(encoding="utf-8", errors="ignore")
+    # 4. Web Security Vulnerabilities (dangerouslySetInnerHTML XSS + .gitignore missing .env)
+    assert summary["classification_breakdown"]["confirmed"] >= 1
 
 
-def test_github_workspace_sanitization_and_media_only_rejection(tmp_path):
-    # Repo with only images + sensitive dir must be rejected and cleaned up
-    media_repo = tmp_path / "media_repo"
-    (media_repo / "certs").mkdir(parents=True)
-    (media_repo / "certs" / "tls.key").write_text("PRIVATE_KEY_DATA", encoding="utf-8")
-    (media_repo / "logo.png").write_bytes(b"\x89PNG")
-
-    removed = sanitize_workspace_sensitive_items(media_repo)
-    assert "certs/" in removed
-    assert not (media_repo / "certs").exists()
-
-    try:
-        validate_workspace_content(media_repo, pre_sensitive=removed)
-        assert False, "Expected ValueError for media-only GitHub workspace"
-    except ValueError as exc:
-        msg = str(exc).lower()
-        assert "no valid web or source code files" in msg
-        assert "certs/" in msg
-    assert not media_repo.exists()
+def test_secret_masking_utility():
+    assert mask_secret("sk-1234567890abcdef") != "sk-1234567890abcdef"
+    assert "*" in mask_secret("sk-1234567890abcdef")
+    assert mask_secret("AKIAIOSFODNN7EXAMPLE") == "AKIA**************LE"
