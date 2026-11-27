@@ -9,7 +9,7 @@ export const MAIN_NAVIGATION: NavItem[] = [
   { path: '/intelligence', label: 'Threat Intelligence', icon: 'Radio' },
   { path: '/cve-database', label: 'CVE Database', icon: 'Database' },
   { path: '/domain-scanner', label: 'Domain Scanner', icon: 'Globe' },
-  { path: '/code-scanner', label: 'Code Scanner', icon: 'Code2' },
+  { path: '/import-project', label: 'Import Project', icon: 'FolderInput' },
   { path: '/attack-surface', label: 'Attack Surface', icon: 'Network' },
   { path: '/validation', label: 'Vulnerability Validation', icon: 'ShieldCheck' },
   { path: '/ai-analyst', label: 'AI Security Assistant', icon: 'Bot' },
