@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
     BACKUP_DIR: str = "./backups"
     REPORTS_DIR: str = "./reports_output"
-    MAX_UPLOAD_SIZE_MB: int = 250
+    MAX_UPLOAD_SIZE_MB: int = 1000
 
     SCAN_HTTP_TIMEOUT_SECONDS: float = 8.0
     SCAN_MAX_REDIRECTS: int = 3

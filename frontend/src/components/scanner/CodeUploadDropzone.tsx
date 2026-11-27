@@ -1,6 +1,47 @@
 import React, { useRef, useState } from 'react'
 import { FileArchive, FileCode2, FolderOpen, UploadCloud } from 'lucide-react'
 
+// Supported text, code, and configuration extensions
+const CODE_AND_CONFIG_EXTENSIONS = new Set([
+  '.html', '.htm',
+  '.css', '.scss', '.sass', '.less',
+  '.js', '.jsx', '.mjs', '.cjs',
+  '.ts', '.tsx',
+  '.py',
+  '.php',
+  '.vue',
+  '.svelte',
+  '.astro',
+  '.ejs', '.hbs', '.pug',
+  '.jsp', '.asp', '.aspx',
+  '.java', '.go', '.rb',
+  '.sql',
+  '.graphql', '.gql',
+  '.json', '.yaml', '.yml', '.toml', '.xml',
+  '.txt', '.md',
+  '.gitignore', '.env',
+])
+
+const KNOWN_CONFIG_NAMES = new Set([
+  'package.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'tsconfig.json',
+  'jsconfig.json',
+  'composer.json',
+  'requirements.txt',
+  'pyproject.toml',
+  'pipfile',
+  'pom.xml',
+  'build.gradle',
+  'dockerfile',
+  'docker-compose.yml',
+  'docker-compose.yaml',
+  '.gitignore',
+  '.env',
+])
+
 const IGNORED_SYSTEM_DIRS = new Set([
   '.git',
   'node_modules',
@@ -27,6 +68,17 @@ function getRelPath(file: File): string {
   return ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name).replace(/\\/g, '/')
 }
 
+function isScannableSourceOrConfig(file: File): boolean {
+  const lowName = file.name.toLowerCase()
+  if (KNOWN_CONFIG_NAMES.has(lowName) || lowName.startsWith('.env.')) {
+    return true
+  }
+  const dotIdx = lowName.lastIndexOf('.')
+  if (dotIdx === -1) return false
+  const ext = lowName.slice(dotIdx)
+  return CODE_AND_CONFIG_EXTENSIONS.has(ext)
+}
+
 export const CodeUploadDropzone: React.FC<{
   onUpload: (files: File[]) => Promise<void>
   onValidationError?: (message: string) => void
@@ -37,33 +89,50 @@ export const CodeUploadDropzone: React.FC<{
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null)
   const [selectedNames, setSelectedNames] = useState<string[]>([])
+  const [excludedCount, setExcludedCount] = useState<number>(0)
 
   const handleFiles = async (fileList: FileList | null, isFolder: boolean) => {
     if (!fileList || fileList.length === 0) return
 
     const allFiles = Array.from(fileList)
-    const eligibleFiles: File[] = []
+    const scannableFiles: File[] = []
+    let excluded = 0
 
     for (const file of allFiles) {
       const relPath = getRelPath(file)
       const parts = relPath.split('/')
       if (isFolder && parts.slice(0, -1).some(isIgnoredSystemSegment)) {
+        excluded++
         continue
       }
-      eligibleFiles.push(file)
+      if (isScannableSourceOrConfig(file)) {
+        scannableFiles.push(file)
+      } else {
+        excluded++
+      }
     }
 
-    if (eligibleFiles.length === 0) {
-      onValidationError?.('No files found in the selected folder. Please choose a valid website project.')
+    setExcludedCount(excluded)
+
+    if (scannableFiles.length === 0) {
+      setSelectedLabel(null)
+      setSelectedNames([])
+      onValidationError?.(
+        `Selected folder contains ${allFiles.length} files, but none are web development source or configuration files (HTML, CSS, JS, TS, Python, PHP, .env, etc.). Non-code files (${excluded}) were skipped.`
+      )
       return
     }
 
-    const firstRel = getRelPath(eligibleFiles[0])
+    const firstRel = getRelPath(scannableFiles[0])
     const folderName = isFolder && firstRel.includes('/') ? firstRel.split('/')[0] : null
-    setSelectedLabel(folderName ? `${folderName} (${eligibleFiles.length} files)` : `${eligibleFiles.length} item(s)`)
-    setSelectedNames(eligibleFiles.map(getRelPath))
+    const label = folderName
+      ? `${folderName} (${scannableFiles.length} source/config files, ${excluded} non-code files auto-skipped)`
+      : `${scannableFiles.length} source file(s)`
 
-    await onUpload(eligibleFiles)
+    setSelectedLabel(label)
+    setSelectedNames(scannableFiles.map(getRelPath))
+
+    await onUpload(scannableFiles)
   }
 
   return (
@@ -105,7 +174,7 @@ export const CodeUploadDropzone: React.FC<{
             : 'Select or Upload Entire Website Project Folder or ZIP'}
         </p>
         <p className="text-xs text-slate-400 mt-1.5 max-w-xl mx-auto leading-relaxed">
-          Automatically discovers all files, validates web technologies (React, Vite, Next.js, Node, Python, PHP), detects sensitive keys in .env, and audits full project security.
+          Accepts any website folder or project of any size. Automatically discovers all source files and .env configurations while intelligently filtering non-code binaries.
         </p>
 
         <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
@@ -139,7 +208,7 @@ export const CodeUploadDropzone: React.FC<{
           <div className="mt-5 pt-4 border-t border-slate-800/80">
             <p className="text-xs font-medium text-cyan-300 mb-2 inline-flex items-center gap-1.5">
               <UploadCloud className="w-3.5 h-3.5" />
-              Selected Project: {selectedLabel}
+              Scanning: {selectedLabel}
             </p>
             <div className="flex flex-wrap justify-center gap-2 max-h-32 overflow-y-auto">
               {selectedNames.slice(0, 8).map((name) => (

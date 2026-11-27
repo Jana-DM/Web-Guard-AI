@@ -61,12 +61,14 @@ export const CodeScannerPage: React.FC = () => {
     setLoading(true)
     setError(null)
     setResult(null)
+    setProgressText('Cloning repository & analyzing web project...')
     try {
       setResult(await scannerApi.scanGitHubRepo(repoUrl, branch || undefined))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'GitHub repository scan failed')
     } finally {
       setLoading(false)
+      setProgressText(null)
     }
   }
 
@@ -117,7 +119,42 @@ export const CodeScannerPage: React.FC = () => {
     <div className="space-y-6">
       {error && <ErrorBanner message={error} onClose={() => setError(null)} />}
 
-      {mode === 'choose' ? (
+      {/* ROTATING CIRCULAR LOADER OVERLAY (MATCHING USER SCREENSHOT) */}
+      {loading && (
+        <div className="bg-[#0c1322] border border-cyan-500/40 rounded-2xl p-10 shadow-2xl flex flex-col items-center justify-center text-center">
+          <div className="relative w-20 h-20 mb-6">
+            {/* Circular arc spinner matching user screenshot */}
+            <div className="w-20 h-20 rounded-full border-4 border-slate-800 border-t-cyan-400 animate-spin"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Shield className="w-7 h-7 text-cyan-400 animate-pulse" />
+            </div>
+          </div>
+
+          <h3 className="text-xl font-bold text-slate-100 tracking-wide">
+            Analyzing Web Project Security
+          </h3>
+          <p className="text-xs text-cyan-300 font-mono mt-2.5 max-w-lg leading-relaxed animate-pulse">
+            {progressText || 'Inspecting files, validating technologies, and detecting vulnerabilities...'}
+          </p>
+
+          <div className="mt-8 flex flex-wrap justify-center gap-3 text-xs text-slate-300">
+            <span className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#060a13] border border-slate-800 shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+              1. Tech &amp; Framework Validation
+            </span>
+            <span className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#060a13] border border-slate-800 shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+              2. Sensitive Key Masking (.env)
+            </span>
+            <span className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#060a13] border border-slate-800 shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+              3. Deep Vulnerability Audit
+            </span>
+          </div>
+        </div>
+      )}
+
+      {!loading && mode === 'choose' && (
         <Card
           title="Select Website Project Source"
           subtitle="Choose whether to scan a project folder on your device or a public GitHub repository"
@@ -158,7 +195,9 @@ export const CodeScannerPage: React.FC = () => {
             </button>
           </div>
         </Card>
-      ) : (
+      )}
+
+      {!loading && mode !== 'choose' && (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <button
@@ -251,7 +290,7 @@ export const CodeScannerPage: React.FC = () => {
       )}
 
       {/* STEP 6: PROFESSIONAL CYBERSECURITY DASHBOARD */}
-      {result && (
+      {!loading && result && (
         <div className="space-y-6 pt-2">
           {/* Top Status Banner */}
           <div className="bg-[#0c1322] border border-cyan-500/30 rounded-xl p-5 shadow-xl">
