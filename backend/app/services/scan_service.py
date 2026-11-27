@@ -135,7 +135,12 @@ def execute_domain_scan_job(
         raise
 
 
-def execute_code_scan_job(db: Session, scan_job: ScanJob, workspace: Path) -> ScanJob:
+def execute_code_scan_job(
+    db: Session,
+    scan_job: ScanJob,
+    workspace: Path,
+    extra_summary: dict[str, Any] | None = None,
+) -> ScanJob:
     scan_job.status = "running"
     scan_job.started_at = datetime.now(timezone.utc)
     scan_job.progress = 15
@@ -151,7 +156,7 @@ def execute_code_scan_job(db: Session, scan_job: ScanJob, workspace: Path) -> Sc
             kind = detect_file_kind(f)
             if kind == "python":
                 raw_findings.extend(analyze_python_ast(f, rel))
-            if kind in {"python", "javascript", "typescript"}:
+            if kind in {"python", "javascript", "typescript", "html", "css", "php"}:
                 raw_findings.extend(run_custom_rules(f, rel, kind))
 
         bandit_res = run_bandit_scan(workspace)
@@ -196,7 +201,7 @@ def execute_code_scan_job(db: Session, scan_job: ScanJob, workspace: Path) -> Sc
         scan_job.status = "completed"
         scan_job.progress = 100
         scan_job.completed_at = datetime.now(timezone.utc)
-        scan_job.summary = {
+        summary_payload: dict[str, Any] = {
             "files_scanned": len(files),
             "languages": lang_summary,
             "total_findings": len(vulns),
@@ -204,6 +209,15 @@ def execute_code_scan_job(db: Session, scan_job: ScanJob, workspace: Path) -> Sc
             "potential_findings": sum(1 for v in vulns if v.classification == "POTENTIAL"),
             "filtered_false_positives": sum(1 for v in vulns if v.classification == "NOT REPRODUCED"),
         }
+        if extra_summary:
+            if extra_summary.get("sensitive_detected"):
+                summary_payload["sensitive_detected"] = extra_summary["sensitive_detected"]
+                summary_payload["sensitive_notice"] = (
+                    "Sensitive files/folders were detected by path name and excluded without reading or saving contents."
+                )
+            if extra_summary.get("skipped_non_web"):
+                summary_payload["skipped_non_web"] = extra_summary["skipped_non_web"]
+        scan_job.summary = summary_payload
         db.commit()
         db.refresh(scan_job)
         return scan_job

@@ -1,8 +1,8 @@
 import React, { useState } from 'react'
-import { ArrowLeft, CheckCircle2, FolderOpen, GitBranch, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, FolderOpen, GitBranch, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { Card, ErrorBanner } from '../../components/common/UIPrimitives'
-import { CodeUploadDropzone } from '../../components/scanner/CodeUploadDropzone'
+import { CodeUploadDropzone, type UploadMetadata } from '../../components/scanner/CodeUploadDropzone'
 import { scannerApi } from '../../services/scanner/scannerApi'
 import type { ScanJob } from '../../types'
 
@@ -18,18 +18,23 @@ export const CodeScannerPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<ScanJob | null>(null)
 
-  const handleUpload = async (files: File[]) => {
+  const handleUpload = async (files: File[], metadata: UploadMetadata) => {
     setLoading(true)
     setError(null)
-    setProgressText(`Preparing ${files.length} file(s)...`)
+    setResult(null)
+    setProgressText(`Validating & preparing ${files.length} web file(s)...`)
     try {
-      const scanJob = await scannerApi.uploadCodeScan(files, ({ uploaded, total, stage }) => {
-        if (stage === 'uploading') {
-          setProgressText(`Uploading folder batch: ${uploaded} / ${total} files...`)
-        } else {
-          setProgressText(`Running static security analysis across ${total} file(s)...`)
-        }
-      })
+      const scanJob = await scannerApi.uploadCodeScan(
+        files,
+        ({ uploaded, total, stage }) => {
+          if (stage === 'uploading') {
+            setProgressText(`Uploading folder batch: ${uploaded} / ${total} files...`)
+          } else {
+            setProgressText(`Running static security analysis across ${total} web file(s)...`)
+          }
+        },
+        metadata
+      )
       setResult(scanJob)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Code scan failed')
@@ -43,6 +48,7 @@ export const CodeScannerPage: React.FC = () => {
     e.preventDefault()
     setLoading(true)
     setError(null)
+    setResult(null)
     try {
       setResult(await scannerApi.scanGitHubRepo(repoUrl, branch || undefined))
     } catch (err) {
@@ -56,6 +62,9 @@ export const CodeScannerPage: React.FC = () => {
     setMode(nextMode)
     setError(null)
   }
+
+  const sensitiveDetected = (result?.summary?.sensitive_detected as string[] | undefined) || []
+  const skippedNonWeb = (result?.summary?.skipped_non_web as Record<string, number> | undefined) || {}
 
   return (
     <div className="space-y-6">
@@ -77,7 +86,7 @@ export const CodeScannerPage: React.FC = () => {
               </div>
               <h4 className="text-base font-semibold text-slate-100">Scan Folder or Files (Device)</h4>
               <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-                Pick a local project folder, source files (.py, .js, .ts), or ZIP archive straight from your computer.
+                Pick a local project folder, web files (HTML, CSS, JS, TS, Python, PHP), or ZIP straight from your computer.
               </p>
               <span className="inline-block mt-4 text-xs font-semibold text-cyan-400 group-hover:translate-x-0.5 transition-transform">
                 Choose Local Folder →
@@ -94,7 +103,7 @@ export const CodeScannerPage: React.FC = () => {
               </div>
               <h4 className="text-base font-semibold text-slate-100">Scan GitHub Repository</h4>
               <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-                Provide a public GitHub repository URL for isolated shallow cloning and static vulnerability analysis.
+                Validates web content, excludes sensitive files/folders without inspection, and runs static security analysis.
               </p>
               <span className="inline-block mt-4 text-xs font-semibold text-indigo-400 group-hover:translate-x-0.5 transition-transform">
                 Enter GitHub Repo →
@@ -141,11 +150,14 @@ export const CodeScannerPage: React.FC = () => {
           {mode === 'folder' ? (
             <Card
               title="Scan Project Folder or Files from Device"
-              subtitle="Analyzed statically in an isolated workspace — uploaded code is never executed"
+              subtitle="Only valid web/source files are analyzed; media-only folders are rejected and sensitive items are never inspected or stored"
             >
               <CodeUploadDropzone
                 onUpload={handleUpload}
-                onValidationError={(msg) => setError(msg)}
+                onValidationError={(msg) => {
+                  setResult(null)
+                  setError(msg)
+                }}
                 loading={loading}
                 progressText={progressText}
               />
@@ -153,7 +165,7 @@ export const CodeScannerPage: React.FC = () => {
           ) : (
             <Card
               title="Scan Public GitHub Repository"
-              subtitle="Shallow static clone with git hooks disabled"
+              subtitle="Shallow static clone with git hooks disabled, pre-validated for web content & sensitive-file protection"
             >
               <form onSubmit={handleGitHubScan} className="space-y-4 max-w-2xl">
                 <div>
@@ -183,7 +195,7 @@ export const CodeScannerPage: React.FC = () => {
                   className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold disabled:opacity-50"
                 >
                   <GitBranch className="w-4 h-4" />
-                  {loading ? 'Cloning & Scanning...' : 'Scan GitHub Repo'}
+                  {loading ? 'Validating & Scanning Repo...' : 'Scan GitHub Repo'}
                 </button>
               </form>
             </Card>
@@ -206,13 +218,37 @@ export const CodeScannerPage: React.FC = () => {
             </button>
           }
         >
-          <div className="flex items-center gap-2 text-xs text-emerald-400 mb-3">
-            <CheckCircle2 className="w-4 h-4" />
-            <span>Scan completed and validated through the 6-stage pipeline.</span>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-xs text-emerald-400">
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Scan completed and validated through the 6-stage pipeline.</span>
+            </div>
+
+            {sensitiveDetected.length > 0 && (
+              <div className="p-3.5 rounded-lg bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200">
+                <div className="flex items-center gap-2 font-semibold text-amber-300">
+                  <ShieldAlert className="w-4 h-4 shrink-0" />
+                  <span>Sensitive Files / Folders Detected &amp; Skipped (Never Inspected or Stored):</span>
+                </div>
+                <p className="mt-1 break-all">
+                  {sensitiveDetected.join(', ')}
+                </p>
+              </div>
+            )}
+
+            {Object.keys(skippedNonWeb).length > 0 && (
+              <div className="text-xs text-slate-400">
+                Skipped non-web files:{' '}
+                {Object.entries(skippedNonWeb)
+                  .map(([k, v]) => `${v} ${k.replace('_', ' ')}`)
+                  .join(', ')}
+              </div>
+            )}
+
+            <pre className="bg-[#060a13] border border-slate-800 rounded-lg p-4 text-xs text-cyan-200 overflow-x-auto">
+              {JSON.stringify(result.summary, null, 2)}
+            </pre>
           </div>
-          <pre className="bg-[#060a13] border border-slate-800 rounded-lg p-4 text-xs text-cyan-200 overflow-x-auto">
-            {JSON.stringify(result.summary, null, 2)}
-          </pre>
         </Card>
       )}
     </div>

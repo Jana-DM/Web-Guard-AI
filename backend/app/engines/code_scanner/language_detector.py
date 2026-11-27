@@ -9,8 +9,21 @@ EXTENSION_LANGUAGE_MAP = {
     ".jsx": "javascript",
     ".mjs": "javascript",
     ".cjs": "javascript",
+    ".vue": "javascript",
+    ".svelte": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".html": "html",
+    ".htm": "html",
+    ".ejs": "html",
+    ".hbs": "html",
+    ".pug": "html",
+    ".css": "css",
+    ".scss": "css",
+    ".sass": "css",
+    ".less": "css",
+    ".php": "php",
+    ".sql": "sql",
 }
 
 MANIFEST_FILES = {
@@ -18,12 +31,13 @@ MANIFEST_FILES = {
     "pyproject.toml": "python_manifest",
     "package.json": "node_manifest",
     "package-lock.json": "node_manifest",
+    "composer.json": "php_manifest",
 }
 
 
 def detect_file_kind(path: Path) -> str:
-    if path.name in MANIFEST_FILES:
-        return MANIFEST_FILES[path.name]
+    if path.name.lower() in MANIFEST_FILES:
+        return MANIFEST_FILES[path.name.lower()]
     return EXTENSION_LANGUAGE_MAP.get(path.suffix.lower(), "other")
 
 
