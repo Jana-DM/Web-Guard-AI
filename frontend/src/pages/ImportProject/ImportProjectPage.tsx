@@ -2,17 +2,17 @@
  * Import Project Page
  * -------------------
  * Step 0 of the guided pipeline.
- * User selects / drags a project folder → sees a "Start Security Scan" button
- * → pipeline kicks off automatically.
+ * User selects / drags a project folder → sees "Start Full Security Scan" button.
+ * On click: stores files in context ref → navigates to /pipeline.
+ * PipelinePage does the actual upload/scan so errors are always visible.
  */
 import React, { useRef, useState } from 'react'
-import { FolderOpen, GitBranch, Play, Shield, Upload } from 'lucide-react'
+import { FolderOpen, GitBranch, Play, Shield } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { ErrorBanner } from '../../components/common/UIPrimitives'
 import { useScanPipeline } from '../../contexts/ScanPipelineContext'
-import { scannerApi } from '../../services/scanner/scannerApi'
 
-// ── file helpers (same as CodeUploadDropzone) ─────────────────────────────────
+// ── file helpers ─────────────────────────────────────────────────────────────
 const CODE_EXTS = new Set([
   '.html','.htm','.css','.scss','.sass','.less',
   '.js','.jsx','.mjs','.cjs','.ts','.tsx',
@@ -25,15 +25,16 @@ const CONFIG_NAMES = new Set([
   'package.json','package-lock.json','pnpm-lock.yaml','yarn.lock',
   'tsconfig.json','jsconfig.json','composer.json','requirements.txt',
   'pyproject.toml','pipfile','pom.xml','build.gradle',
-  'dockerfile','docker-compose.yml','docker-compose.yaml',
-  '.gitignore','.env',
+  'dockerfile','docker-compose.yml','docker-compose.yaml','.gitignore','.env',
 ])
 const SKIP_DIRS = new Set([
   '.git','node_modules','.venv','venv','env','__pycache__',
   'dist','build','.next','.nuxt','site-packages','.pytest_cache','.mypy_cache','.tox','coverage',
 ])
 
-function isSkipDir(seg: string) { return SKIP_DIRS.has(seg) || seg.startsWith('.venv') || seg.startsWith('venv') }
+function isSkipDir(seg: string) {
+  return SKIP_DIRS.has(seg) || seg.startsWith('.venv') || seg.startsWith('venv')
+}
 function getRelPath(file: File): string {
   return ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name).replace(/\\/g, '/')
 }
@@ -62,7 +63,7 @@ async function readEntry(entry: any, base = ''): Promise<File[]> {
     }
     const entries = await readBatch()
     const nextBase = base ? `${base}/${entry.name}` : entry.name
-    const nested = await Promise.all(entries.map(e => readEntry(e, nextBase)))
+    const nested = await Promise.all(entries.map((e: any) => readEntry(e, nextBase)))
     return nested.flat()
   }
   return []
@@ -81,8 +82,6 @@ export const ImportProjectPage: React.FC = () => {
   const [folderLabel, setFolderLabel] = useState<string | null>(null)
   const [excluded, setExcluded] = useState(0)
   const [error, setError] = useState<string | null>(null)
-  const [scanning, setScanning] = useState(false)
-  const [progressText, setProgressText] = useState<string>('')
 
   // github mode
   const [mode, setMode] = useState<'folder' | 'github'>('folder')
@@ -101,7 +100,7 @@ export const ImportProjectPage: React.FC = () => {
     }
     setExcluded(skip)
     if (!scannable.length) {
-      setError(`No web source files found (${all.length} files scanned, ${skip} non-code skipped). Please select a web development project folder.`)
+      setError(`No web source files found (${all.length} files scanned, ${skip} non-code skipped). Select a web development project folder.`)
       setFiles([])
       setFolderLabel(null)
       return
@@ -115,69 +114,40 @@ export const ImportProjectPage: React.FC = () => {
     setError(null)
   }
 
-  // drag handlers
-  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); if (!scanning) setIsDragging(true) }
+  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); if (!isDragging) setIsDragging(true) }
   const onDragLeave = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(false) }
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault(); setIsDragging(false)
-    if (scanning) return
     const items = e.dataTransfer.items
     if (items?.length) {
-      const all: File[] = []; let isFolder = false
+      const all: File[] = []; let isDir = false
       for (let i = 0; i < items.length; i++) {
         const entry = (items[i] as any).webkitGetAsEntry?.()
-        if (entry) { if (entry.isDirectory) isFolder = true; all.push(...await readEntry(entry)) }
+        if (entry) { if (entry.isDirectory) isDir = true; all.push(...await readEntry(entry)) }
       }
-      if (all.length) { processFiles(all, isFolder); return }
+      if (all.length) { processFiles(all, isDir); return }
     }
     if (e.dataTransfer.files?.length) processFiles(Array.from(e.dataTransfer.files), false)
   }
 
-  // ── START SCAN ──────────────────────────────────────────────────────────────
-  const startScan = async () => {
-    if (scanning) return
-    setScanning(true)
-    setError(null)
+  // ── START — just store files in context ref, then navigate ────────────────
+  const startScan = () => {
     pipeline.reset()
-
-    try {
-      let job: Awaited<ReturnType<typeof scannerApi.uploadCodeScan>> | null = null
-
-      if (mode === 'github') {
-        setProgressText('Cloning GitHub repository and validating web project...')
-        pipeline.setStage('code-scanning')
-        navigate('/pipeline')
-        job = await scannerApi.scanGitHubRepo(repoUrl, branch || undefined)
-      } else {
-        pipeline.setStage('code-scanning')
-        navigate('/pipeline')
-        setProgressText(`Validating project (${files.length} files)...`)
-        job = await scannerApi.uploadCodeScan(files, ({ uploaded, total, stage }) => {
-          if (stage === 'uploading')
-            setProgressText(`Uploading files: ${uploaded} / ${total}...`)
-          else
-            setProgressText(`Running 7-stage security audit across ${total} files...`)
-        })
-      }
-
-      const summary = (job.summary || {}) as Record<string, any>
-      pipeline.setScanJob(job)
-      pipeline.setScanJobId(job.id)
-      pipeline.setProjectName(summary.project_name || job.target_label || 'Web Project')
-      pipeline.setStage('code-done')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Scan failed')
-      pipeline.setStage('import')
-      setScanning(false)
-    }
+    pipeline.pendingFilesRef.current = files
+    pipeline.setPendingGitHub(null)
+    pipeline.setStage('pending-scan')
+    navigate('/pipeline')
   }
 
-  const startGithubScan = async (e: React.FormEvent) => {
+  const startGitHub = (e: React.FormEvent) => {
     e.preventDefault()
-    await startScan()
+    pipeline.reset()
+    pipeline.pendingFilesRef.current = []
+    pipeline.setPendingGitHub({ url: repoUrl, branch: branch || undefined })
+    pipeline.setStage('pending-scan')
+    navigate('/pipeline')
   }
 
-  // ── render ──────────────────────────────────────────────────────────────────
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       {error && <ErrorBanner message={error} onClose={() => setError(null)} />}
@@ -215,21 +185,13 @@ export const ImportProjectPage: React.FC = () => {
 
       {/* Mode Toggle */}
       <div className="inline-flex rounded-lg border border-slate-800 bg-[#060a13] p-1">
-        <button
-          type="button"
-          onClick={() => { setMode('folder'); setFiles([]); setFolderLabel(null); setError(null) }}
-          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${mode === 'folder' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-        >
-          <FolderOpen className="w-4 h-4" />
-          Device Folder / Files
+        <button type="button" onClick={() => { setMode('folder'); setFiles([]); setFolderLabel(null); setError(null) }}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${mode === 'folder' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+          <FolderOpen className="w-4 h-4" /> Device Folder / Files
         </button>
-        <button
-          type="button"
-          onClick={() => { setMode('github'); setFiles([]); setFolderLabel(null); setError(null) }}
-          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${mode === 'github' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-        >
-          <GitBranch className="w-4 h-4" />
-          GitHub Repo
+        <button type="button" onClick={() => { setMode('github'); setFiles([]); setFolderLabel(null); setError(null) }}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${mode === 'github' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+          <GitBranch className="w-4 h-4" /> GitHub Repo
         </button>
       </div>
 
@@ -237,63 +199,37 @@ export const ImportProjectPage: React.FC = () => {
         <>
           {/* Drop Zone */}
           <div
-            onDragOver={onDragOver}
-            onDragEnter={onDragOver}
-            onDragLeave={onDragLeave}
-            onDrop={onDrop}
-            onClick={() => !scanning && folderRef.current?.click()}
+            onDragOver={onDragOver} onDragEnter={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
+            onClick={() => folderRef.current?.click()}
             className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all ${
-              isDragging
-                ? 'border-cyan-400 bg-cyan-950/40 scale-[1.01] shadow-2xl shadow-cyan-500/20 ring-4 ring-cyan-500/30'
-                : files.length
-                  ? 'border-emerald-500/60 bg-emerald-950/10'
-                  : 'border-slate-700 hover:border-cyan-500/70 bg-[#060a13]/70'
+              isDragging ? 'border-cyan-400 bg-cyan-950/40 scale-[1.01] shadow-2xl shadow-cyan-500/20 ring-4 ring-cyan-500/30'
+              : files.length ? 'border-emerald-500/60 bg-emerald-950/10'
+              : 'border-slate-700 hover:border-cyan-500/70 bg-[#060a13]/70'
             }`}
           >
-            {/* Hidden inputs */}
-            <input
-              ref={folderRef}
-              type="file"
-              multiple
-              className="hidden"
+            <input ref={folderRef} type="file" multiple className="hidden"
               {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
-              onChange={e => { if (e.target.files) processFiles(Array.from(e.target.files), true); e.target.value = '' }}
-            />
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
+              onChange={e => { if (e.target.files) processFiles(Array.from(e.target.files), true); e.target.value = '' }} />
+            <input ref={fileRef} type="file" multiple className="hidden"
               accept=".html,.htm,.css,.scss,.sass,.less,.py,.js,.jsx,.mjs,.cjs,.ts,.tsx,.php,.vue,.svelte,.sql,.zip,.json,.txt,.toml,.env,.env.*,.gitignore"
-              className="hidden"
-              onChange={e => { if (e.target.files) processFiles(Array.from(e.target.files), false); e.target.value = '' }}
-            />
+              onChange={e => { if (e.target.files) processFiles(Array.from(e.target.files), false); e.target.value = '' }} />
 
             <div className={`transition-transform duration-200 ${isDragging ? 'scale-110' : ''}`}>
-              {files.length > 0 ? (
-                <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center">
-                  <Upload className="w-7 h-7 text-emerald-400" />
-                </div>
-              ) : (
-                <FolderOpen className={`w-14 h-14 mx-auto mb-3 ${isDragging ? 'text-cyan-300 animate-bounce' : 'text-cyan-400/60'}`} />
-              )}
+              <FolderOpen className={`w-14 h-14 mx-auto mb-3 ${isDragging ? 'text-cyan-300 animate-bounce' : files.length ? 'text-emerald-400' : 'text-cyan-400/60'}`} />
             </div>
 
             {files.length > 0 ? (
               <>
-                <p className="text-base font-semibold text-emerald-300">Project Ready to Scan!</p>
+                <p className="text-base font-semibold text-emerald-300">✅ Project Ready to Scan!</p>
                 <p className="text-sm text-slate-300 mt-1">{folderLabel}</p>
-                {excluded > 0 && (
-                  <p className="text-xs text-slate-500 mt-1">{excluded} non-code / system files auto-excluded</p>
-                )}
+                {excluded > 0 && <p className="text-xs text-slate-500 mt-1">{excluded} non-code / system files auto-excluded</p>}
                 <div className="flex flex-wrap justify-center gap-1.5 mt-3 max-h-20 overflow-y-auto">
                   {files.slice(0, 6).map(f => (
                     <span key={getRelPath(f)} className="px-2 py-0.5 rounded bg-slate-800 text-xs text-cyan-300 font-mono">
                       {getRelPath(f).split('/').slice(-2).join('/')}
                     </span>
                   ))}
-                  {files.length > 6 && (
-                    <span className="px-2 py-0.5 rounded bg-slate-800 text-xs text-slate-400">+{files.length - 6} more</span>
-                  )}
+                  {files.length > 6 && <span className="px-2 py-0.5 rounded bg-slate-800 text-xs text-slate-400">+{files.length - 6} more</span>}
                 </div>
               </>
             ) : (
@@ -302,23 +238,16 @@ export const ImportProjectPage: React.FC = () => {
                   {isDragging ? 'Drop Your Project Folder Here!' : 'Drag & Drop Your Project Folder'}
                 </p>
                 <p className="text-sm text-slate-400 mt-1 max-w-md mx-auto">
-                  Drop your entire web project folder (React, Vue, Next.js, Node, Python, PHP…).
-                  Non-code files and node_modules are automatically excluded.
+                  Drop your entire web project (React, Vue, Next.js, Node, Python, PHP…).
+                  node_modules, .git and binary files are automatically excluded.
                 </p>
                 <div className="mt-5 flex flex-wrap justify-center gap-3">
-                  <button
-                    type="button"
-                    onClick={e => { e.stopPropagation(); folderRef.current?.click() }}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold shadow-md"
-                  >
-                    <FolderOpen className="w-4 h-4" />
-                    Browse Project Folder
+                  <button type="button" onClick={e => { e.stopPropagation(); folderRef.current?.click() }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold shadow-md">
+                    <FolderOpen className="w-4 h-4" /> Browse Project Folder
                   </button>
-                  <button
-                    type="button"
-                    onClick={e => { e.stopPropagation(); fileRef.current?.click() }}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-sm font-medium"
-                  >
+                  <button type="button" onClick={e => { e.stopPropagation(); fileRef.current?.click() }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-sm font-medium">
                     Select Files or ZIP
                   </button>
                 </div>
@@ -328,48 +257,30 @@ export const ImportProjectPage: React.FC = () => {
 
           {/* SCAN BUTTON — appears once files selected */}
           {files.length > 0 && (
-            <button
-              type="button"
-              onClick={startScan}
-              disabled={scanning}
-              className="w-full inline-flex items-center justify-center gap-3 px-6 py-4 rounded-xl bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white text-base font-bold shadow-lg shadow-cyan-500/30 disabled:opacity-60 transition-all"
-            >
+            <button type="button" onClick={startScan}
+              className="w-full inline-flex items-center justify-center gap-3 px-6 py-4 rounded-xl bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white text-base font-bold shadow-lg shadow-cyan-500/30 transition-all">
               <Play className="w-5 h-5" />
-              {scanning ? progressText || 'Scanning...' : `Start Full Security Scan  (${files.length} files)`}
+              Start Full Security Scan  ({files.length} files)
             </button>
           )}
         </>
       ) : (
-        /* GitHub Mode */
-        <form onSubmit={startGithubScan} className="space-y-4 bg-[#0c1322] border border-slate-800 rounded-2xl p-6">
+        <form onSubmit={startGitHub} className="space-y-4 bg-[#0c1322] border border-slate-800 rounded-2xl p-6">
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1.5">GitHub Repository URL</label>
-            <input
-              type="url"
-              required
-              value={repoUrl}
-              onChange={e => setRepoUrl(e.target.value)}
+            <input type="url" required value={repoUrl} onChange={e => setRepoUrl(e.target.value)}
               placeholder="https://github.com/owner/repository"
-              className="w-full bg-[#060a13] border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-cyan-500"
-            />
+              className="w-full bg-[#060a13] border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-cyan-500" />
           </div>
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1.5">Branch (Optional)</label>
-            <input
-              type="text"
-              value={branch}
-              onChange={e => setBranch(e.target.value)}
+            <input type="text" value={branch} onChange={e => setBranch(e.target.value)}
               placeholder="main"
-              className="w-full bg-[#060a13] border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-cyan-500"
-            />
+              className="w-full bg-[#060a13] border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-cyan-500" />
           </div>
-          <button
-            type="submit"
-            disabled={scanning || !repoUrl.trim()}
-            className="w-full inline-flex items-center justify-center gap-3 px-6 py-4 rounded-xl bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white text-base font-bold shadow-lg shadow-cyan-500/30 disabled:opacity-60"
-          >
-            <GitBranch className="w-5 h-5" />
-            {scanning ? progressText || 'Cloning & Scanning...' : 'Clone & Start Full Security Scan'}
+          <button type="submit" disabled={!repoUrl.trim()}
+            className="w-full inline-flex items-center justify-center gap-3 px-6 py-4 rounded-xl bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white text-base font-bold shadow-lg shadow-cyan-500/30 disabled:opacity-60">
+            <GitBranch className="w-5 h-5" /> Clone & Start Full Security Scan
           </button>
         </form>
       )}
