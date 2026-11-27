@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     intelligence,
     remediation,
     reports,
+    scan_stream,
     settings,
     users,
     validation,
@@ -24,6 +25,7 @@ api_router.include_router(dashboard.router)
 api_router.include_router(intelligence.router)
 api_router.include_router(cve.router)
 api_router.include_router(domain_scans.router)
+api_router.include_router(scan_stream.router)   # SSE — must be before code_scans to avoid route clash
 api_router.include_router(code_scans.router)
 api_router.include_router(attack_surface.router)
 api_router.include_router(vulnerabilities.router)

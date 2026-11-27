@@ -35,6 +35,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { Card, ErrorBanner } from '../../components/common/UIPrimitives'
 import { DiffViewer } from '../../components/remediation/DiffViewer'
+import { RealtimeScanConsole } from '../../components/scanner/RealtimeScanConsole'
 import { useScanPipeline } from '../../contexts/ScanPipelineContext'
 import { intelligenceApi } from '../../services/intelligence/intelligenceApi'
 import { scannerApi } from '../../services/scanner/scannerApi'
@@ -129,51 +130,6 @@ export const PipelinePage: React.FC = () => {
     if (stage === 'import') {
       navigate('/import-project')
     }
-  }, [stage])
-
-  // ── STAGE: pending-scan → actually run the scan ───────────────────────────
-  useEffect(() => {
-    if (stage !== 'pending-scan') return
-
-    const files = pipeline.pendingFilesRef.current
-    const github = pipeline.pendingGitHub
-
-    if (!files.length && !github) {
-      navigate('/import-project')
-      return
-    }
-
-    const run = async () => {
-      pipeline.setStage('code-scanning')
-      setScanError(null)
-      setProgressText(github ? 'Cloning repository…' : `Validating ${files.length} files…`)
-
-      try {
-        let job: Awaited<ReturnType<typeof scannerApi.uploadCodeScan>>
-
-        if (github) {
-          setProgressText('Cloning GitHub repository and validating web project…')
-          job = await scannerApi.scanGitHubRepo(github.url, github.branch)
-        } else {
-          job = await scannerApi.uploadCodeScan(files, ({ uploaded, total, stage: s }) => {
-            if (s === 'uploading') setProgressText(`Uploading files: ${uploaded} / ${total}…`)
-            else setProgressText(`Running 7-stage security audit across ${total} files…`)
-          })
-        }
-
-        const summary = (job.summary || {}) as Record<string, any>
-        pipeline.setScanJob(job)
-        pipeline.setScanJobId(job.id)
-        pipeline.setProjectName(summary.project_name || job.target_label || 'Web Project')
-        pipeline.setStage('code-done')
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Scan failed — check that the backend is running.'
-        setScanError(msg)
-        // Stay on code-scanning stage so user sees the error
-      }
-    }
-
-    run()
   }, [stage])
 
   // ── STAGE: attack-surface ─────────────────────────────────────────────────
@@ -284,58 +240,21 @@ Keep answers concise and developer-friendly.`
 
       {/* ═══ STAGE: code-scanning / pending-scan ══════════════════════════ */}
       {(stage === 'pending-scan' || stage === 'code-scanning') && (
-        <div className="bg-[#0c1322] border border-cyan-500/40 rounded-2xl p-10 shadow-2xl flex flex-col items-center justify-center text-center min-h-[400px]">
-          {scanError ? (
-            /* Error state — clearly visible */
-            <div className="w-full max-w-lg">
-              <div className="w-16 h-16 rounded-full bg-red-500/15 border border-red-500/40 flex items-center justify-center mx-auto mb-5">
-                <XCircle className="w-8 h-8 text-red-400" />
-              </div>
-              <h3 className="text-xl font-bold text-red-300 mb-2">Scan Failed</h3>
-              <p className="text-sm text-slate-400 mb-5 bg-[#060a13] border border-red-500/30 rounded-xl p-4 text-left font-mono leading-relaxed">
-                {scanError}
-              </p>
-              <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                <button
-                  onClick={() => { pipeline.reset(); navigate('/import-project') }}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold"
-                >
-                  <FolderInput className="w-4 h-4" /> Go Back & Try Again
-                </button>
-                <button
-                  onClick={() => {
-                    setScanError(null)
-                    pipeline.setStage('pending-scan')
-                  }}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-sm font-semibold"
-                >
-                  <RefreshCw className="w-4 h-4" /> Retry Scan
-                </button>
-              </div>
-            </div>
-          ) : (
-            /* Scanning in progress */
-            <>
-              <div className="relative w-20 h-20 mb-6">
-                <div className="w-20 h-20 rounded-full border-4 border-slate-800 border-t-cyan-400 animate-spin" />
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <Shield className="w-7 h-7 text-cyan-400 animate-pulse" />
-                </div>
-              </div>
-              <h3 className="text-xl font-bold text-slate-100">Running Full Security Pipeline</h3>
-              <p className="text-xs text-cyan-300 font-mono mt-2.5 max-w-lg animate-pulse">
-                {progressText || 'Validating technologies → Detecting secrets → Scanning vulnerabilities…'}
-              </p>
-              <div className="mt-8 flex flex-wrap justify-center gap-3 text-xs text-slate-300">
-                {['1. Tech & Framework Validation', '2. Sensitive Key Detection', '3. Deep Vulnerability Audit', '4. Evidence-Based Classification'].map((s, i) => (
-                  <span key={i} className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#060a13] border border-slate-800">
-                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />{s}
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+        <RealtimeScanConsole
+          files={pipeline.pendingFilesRef.current}
+          github={pipeline.pendingGitHub}
+          onComplete={(job) => {
+            const sum = (job.summary || {}) as Record<string, any>
+            pipeline.setScanJob(job)
+            pipeline.setScanJobId(job.id)
+            pipeline.setProjectName(sum.project_name || job.target_label || 'Web Project')
+            pipeline.setStage('code-done')
+          }}
+          onCancel={() => {
+            pipeline.reset()
+            navigate('/import-project')
+          }}
+        />
       )}
 
       {/* ═══ STAGE: code-done ════════════════════════════════════════════ */}

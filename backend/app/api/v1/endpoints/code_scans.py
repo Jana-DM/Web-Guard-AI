@@ -1,11 +1,13 @@
 from pathlib import Path
+import threading
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ResourceNotFoundError
-from app.database.session import get_db
+from app.database.session import get_db, SessionLocal
 from app.dependencies import get_current_user, require_analyst
 from app.engines.code_scanner.file_validator import (
     append_files_to_workspace,
@@ -21,6 +23,18 @@ from app.services.scan_service import execute_code_scan_job
 
 router = APIRouter(prefix="/code-scans", tags=["Code Scanner"])
 
+
+def _run_scan_in_background(scan_id: str, workspace_path: str) -> None:
+    """Runs the full scan in a daemon thread with its own DB session so SSE can poll progress."""
+    db = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if job:
+            execute_code_scan_job(db=db, scan_job=job, workspace=Path(workspace_path))
+    except Exception:
+        pass
+    finally:
+        db.close()
 
 class ChunkedUploadInitRequest(BaseModel):
     target_label: str = Field(default="uploaded_folder", max_length=255)
